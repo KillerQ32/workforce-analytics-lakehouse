@@ -1,184 +1,258 @@
-import os
 import json
 import time
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-DEFAULT_BLS_API_URL = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
 
-BRONZE_BLS_PATH = Path("/Volumes/workforce_analytics/bronze/raw_files/bls/api")
+BRONZE_BLS_PATH = Path("/Volumes/workforce_analytics/bronze/raw_files/bls")
 
-
-BLS_SERIES_GROUPS = {
-    "jolts_national": [
-        {
-            "series_id": "JTS000000000000000JOL",
-            "file_name": "job_openings_level_latest.json",
-            "description": "National job openings level",
-        },
-        {
-            "series_id": "JTS000000000000000JOR",
-            "file_name": "job_openings_rate_latest.json",
-            "description": "National job openings rate",
-        },
-        {
-            "series_id": "JTS000000000000000HIL",
-            "file_name": "hires_level_latest.json",
-            "description": "National hires level",
-        },
-        {
-            "series_id": "JTS000000000000000HIR",
-            "file_name": "hires_rate_latest.json",
-            "description": "National hires rate",
-        },
-        {
-            "series_id": "JTS000000000000000QUL",
-            "file_name": "quits_level_latest.json",
-            "description": "National quits level",
-        },
-        {
-            "series_id": "JTS000000000000000QUR",
-            "file_name": "quits_rate_latest.json",
-            "description": "National quits rate",
-        },
-        {
-            "series_id": "JTS000000000000000LDL",
-            "file_name": "layoffs_discharges_level_latest.json",
-            "description": "National layoffs and discharges level",
-        },
-        {
-            "series_id": "JTS000000000000000LDR",
-            "file_name": "layoffs_discharges_rate_latest.json",
-            "description": "National layoffs and discharges rate",
-        },
-        {
-            "series_id": "JTS000000000000000TSL",
-            "file_name": "total_separations_level_latest.json",
-            "description": "National total separations level",
-        },
-        {
-            "series_id": "JTS000000000000000TSR",
-            "file_name": "total_separations_rate_latest.json",
-            "description": "National total separations rate",
-        },
-    ],
-
-    "cps_context": [
-        {
-            "series_id": "LNS14000000",
-            "file_name": "unemployment_rate_latest.json",
-            "description": "National unemployment rate",
-        },
-        {
-            "series_id": "LNS11300000",
-            "file_name": "labor_force_participation_rate_latest.json",
-            "description": "National labor force participation rate",
-        },
-        {
-            "series_id": "LNS12300000",
-            "file_name": "employment_population_ratio_latest.json",
-            "description": "National employment-population ratio",
-        },
-        {
-            "series_id": "LNS11000000",
-            "file_name": "civilian_labor_force_level_latest.json",
-            "description": "National civilian labor force level",
-        },
-        {
-            "series_id": "LNS12000000",
-            "file_name": "civilian_employment_level_latest.json",
-            "description": "National civilian employment level",
-        },
-        {
-            "series_id": "LNS13000000",
-            "file_name": "civilian_unemployment_level_latest.json",
-            "description": "National civilian unemployment level",
-        },
-    ],
-}
+MAX_RETRIES = 3
+RETRY_SLEEP_SECONDS = 5
 
 
-def build_bls_latest_url(api_url, series_id, api_key=None):
-    base_url = api_url.rstrip("/")
-    query_params = {"latest": "true"}
+BLS_CORE_FILES = [
+    # -----------------------------
+    # OEWS bulk text files
+    # -----------------------------
+    {
+        "source_group": "oews",
+        "file_name": "oe_data_all_data.txt",
+        "url": "https://download.bls.gov/pub/time.series/oe/oe.data.1.AllData",
+        "description": "OEWS all employment and wage time-series data",
+        "required": True,
+    },
+    {
+        "source_group": "oews",
+        "file_name": "oe_series.txt",
+        "url": "https://download.bls.gov/pub/time.series/oe/oe.series",
+        "description": "OEWS series metadata used to decode series IDs",
+        "required": True,
+    },
+    {
+        "source_group": "oews",
+        "file_name": "oe_occupation.txt",
+        "url": "https://download.bls.gov/pub/time.series/oe/oe.occupation",
+        "description": "OEWS occupation lookup table with SOC occupation codes and titles",
+        "required": True,
+    },
+    {
+        "source_group": "oews",
+        "file_name": "oe_area.txt",
+        "url": "https://download.bls.gov/pub/time.series/oe/oe.area",
+        "description": "OEWS area lookup table",
+        "required": True,
+    },
+    {
+        "source_group": "oews",
+        "file_name": "oe_industry.txt",
+        "url": "https://download.bls.gov/pub/time.series/oe/oe.industry",
+        "description": "OEWS industry lookup table",
+        "required": True,
+    },
+    {
+        "source_group": "oews",
+        "file_name": "oe_datatype.txt",
+        "url": "https://download.bls.gov/pub/time.series/oe/oe.datatype",
+        "description": "OEWS datatype lookup table for wage and employment measures",
+        "required": True,
+    },
+    {
+        "source_group": "oews",
+        "file_name": "oe_footnote.txt",
+        "url": "https://download.bls.gov/pub/time.series/oe/oe.footnote",
+        "description": "OEWS footnote lookup table",
+        "required": False,
+    },
+    {
+        "source_group": "oews",
+        "file_name": "oe_documentation.txt",
+        "url": "https://download.bls.gov/pub/time.series/oe/oe.txt",
+        "description": "OEWS bulk data documentation",
+        "required": True,
+    },
 
-    if api_key:
-        query_params["registrationkey"] = api_key
+    # -----------------------------
+    # BLS Employment Projections
+    # -----------------------------
+    {
+        "source_group": "employment_projections",
+        "file_name": "employment_projections_occupation_tables_2024_2034.xlsx",
+        "url": "https://www.bls.gov/emp/ind-occ-matrix/occupation.xlsx",
+        "description": "BLS occupational projections tables with employment, growth, openings, education, training, and wages",
+        "required": True,
+    },
+    {
+        "source_group": "employment_projections",
+        "file_name": "national_employment_matrix_2024_2034.xlsx",
+        "url": "https://www.bls.gov/emp/ind-occ-matrix/matrix.xlsx",
+        "description": "BLS National Employment Matrix industry-occupation data",
+        "required": False,
+    },
+    {
+        "source_group": "crosswalks",
+        "file_name": "onet_soc_to_nem_crosswalk.xlsx",
+        "url": "https://www.bls.gov/emp/classifications-crosswalks/nem-onet-to-soc-crosswalk.xlsx",
+        "description": "O*NET-SOC to BLS National Employment Matrix and Occupational Outlook Handbook crosswalk",
+        "required": True,
+    },
+    {
+        "source_group": "crosswalks",
+        "file_name": "nem_occupational_coverage.xlsx",
+        "url": "https://www.bls.gov/emp/classifications-crosswalks/nem-occupational-coverage.xlsx",
+        "description": "BLS occupational employment directory and occupational coverage reference",
+        "required": True,
+    },
+]
 
-    query = urlencode(query_params)
-    return f"{base_url}/{series_id}?{query}"
+
+def build_request(url: str) -> Request:
+    return Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; WorkforceAnalyticsLakehouse/1.0)",
+            "Accept": "application/octet-stream,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,*/*",
+            "Connection": "close",
+        },
+    )
 
 
-def fetch_raw_json(url):
-    request = Request(url, headers={"Accept": "application/json"})
+def download_file_once(url: str, output_path: Path) -> int:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    try:
-        with urlopen(request, timeout=30) as response:
-            return response.read().decode("utf-8")
-    except HTTPError as error:
-        raise RuntimeError(f"BLS request failed with HTTP {error.code}") from error
-    except URLError as error:
-        raise RuntimeError(f"BLS request failed: {error.reason}") from error
+    request = build_request(url)
+
+    with urlopen(request, timeout=240) as response:
+        status_code = getattr(response, "status", None)
+
+        if status_code and status_code >= 400:
+            raise RuntimeError(f"HTTP {status_code}")
+
+        bytes_written = 0
+
+        with open(output_path, "wb") as file:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+
+                file.write(chunk)
+                bytes_written += len(chunk)
+
+    if bytes_written == 0:
+        raise RuntimeError("Downloaded file is empty")
+
+    return bytes_written
 
 
-def save_raw_json(raw_json, output_path):
+def download_file_with_retries(url: str, output_path: Path, max_retries: int = MAX_RETRIES) -> dict:
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"Attempt {attempt}/{max_retries}: {url}")
+
+            bytes_written = download_file_once(url, output_path)
+
+            return {
+                "status": "success",
+                "bytes_written": bytes_written,
+                "error_message": None,
+            }
+
+        except HTTPError as error:
+            last_error = f"HTTPError {error.code}: {error.reason}"
+            print(f"Download failed: {last_error}")
+
+        except URLError as error:
+            last_error = f"URLError: {error.reason}"
+            print(f"Download failed: {last_error}")
+
+        except Exception as error:
+            last_error = str(error)
+            print(f"Download failed: {last_error}")
+
+        if attempt < max_retries:
+            sleep_time = RETRY_SLEEP_SECONDS * attempt
+            print(f"Retrying in {sleep_time} seconds...")
+            time.sleep(sleep_time)
+
+    return {
+        "status": "failed",
+        "bytes_written": 0,
+        "error_message": last_error,
+    }
+
+
+def save_manifest(records, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_path, "w", encoding="utf-8") as file:
-        file.write(raw_json)
-
-
-def save_manifest(manifest_records, output_path):
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(output_path, "w", encoding="utf-8") as file:
-        json.dump(manifest_records, file, indent=4)
+        json.dump(records, file, indent=4)
 
 
 def main():
-    api_key = os.getenv("BLS_API_KEY")
-    api_url = os.getenv("BLS_API_URL", DEFAULT_BLS_API_URL)
-
-    manifest_records = []
     fetched_at = datetime.now(timezone.utc).isoformat()
+    manifest_records = []
 
-    for group_name, series_list in BLS_SERIES_GROUPS.items():
-        group_path = BRONZE_BLS_PATH / group_name
-        group_path.mkdir(parents=True, exist_ok=True)
+    for file_info in BLS_CORE_FILES:
+        source_group = file_info["source_group"]
+        file_name = file_info["file_name"]
+        url = file_info["url"]
+        description = file_info["description"]
+        required = file_info["required"]
 
-        for series_info in series_list:
-            series_id = series_info["series_id"]
-            file_name = series_info["file_name"]
-            description = series_info["description"]
+        output_path = BRONZE_BLS_PATH / source_group / file_name
 
-            request_url = build_bls_latest_url(api_url, series_id, api_key)
-            raw_json = fetch_raw_json(request_url)
+        print(f"\nDownloading: {description}")
+        print(f"Target path: {output_path}")
 
-            raw_json_path = group_path / file_name
-            save_raw_json(raw_json, raw_json_path)
+        result = download_file_with_retries(url, output_path)
 
-            manifest_records.append({
-                "source": "BLS API v2",
-                "group": group_name,
-                "series_id": series_id,
-                "description": description,
-                "file_name": file_name,
-                "raw_file_path": str(raw_json_path),
-                "fetched_at_utc": fetched_at,
-            })
+        manifest_record = {
+            "source": "BLS",
+            "source_group": source_group,
+            "description": description,
+            "source_url": url,
+            "file_name": file_name,
+            "raw_file_path": str(output_path),
+            "required": required,
+            "download_status": result["status"],
+            "bytes_written": result["bytes_written"],
+            "error_message": result["error_message"],
+            "fetched_at_utc": fetched_at,
+        }
 
-            print(f"Saved {description}: {raw_json_path}")
+        manifest_records.append(manifest_record)
 
-            time.sleep(0.5)
+        if result["status"] == "success":
+            print(f"Saved: {output_path}")
+        else:
+            print(f"Failed: {description}")
+
+            if required:
+                print("This is a required file. The failure is recorded in the manifest.")
 
     manifest_path = BRONZE_BLS_PATH / "_manifest.json"
     save_manifest(manifest_records, manifest_path)
 
-    print("BLS raw JSON files saved to Bronze volume.")
+    failed_required_files = [
+        record for record in manifest_records
+        if record["required"] and record["download_status"] == "failed"
+    ]
+
+    print("\nBLS Bronze ingestion complete.")
     print(f"Manifest saved to: {manifest_path}")
+
+    if failed_required_files:
+        print("\nWARNING: Some required files failed to download:")
+        for record in failed_required_files:
+            print(f"- {record['file_name']}: {record['error_message']}")
+
+        raise RuntimeError("One or more required BLS files failed to download. Check the manifest.")
+
+    print("All required BLS occupation-level files were downloaded successfully.")
 
 
 if __name__ == "__main__":
