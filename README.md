@@ -109,6 +109,12 @@ workforce-analytics-lakehouse/
 ├── dashboards/
 │   └── workforce_outlook.lvdash.json
 │
+├── docs/
+│   └── images/
+│       ├── workforce_outlook_overview.png
+│       ├── workforce_outlook_rankings.png
+│       └── workforce_outlook_details.png
+│
 ├── README.md
 └── requirements.txt
 ```
@@ -862,6 +868,21 @@ workforce_analytics.gold.fact_occupation_projection
 ```
 
 Databricks Genie Code generated the initial dashboard structure, datasets, charts, KPI cards, and filters. The generated dashboard was then manually reviewed and corrected to ensure accurate analytical results.
+
+
+## Dashboard Preview
+
+### Workforce KPIs and Growth Rankings
+
+![Workforce Outlook dashboard overview showing employment KPIs and fastest-growing occupations](docs/images/workforce_outlook_overview.png)
+
+### Annual Openings and Highest-Paying Occupations
+
+![Workforce Outlook dashboard rankings for annual openings and median annual wages](docs/images/workforce_outlook_rankings.png)
+
+### Wage, Growth, and Occupation Details
+
+![Workforce Outlook dashboard scatter plot and occupation details table](docs/images/workforce_outlook_details.png)
 
 ## Dashboard Metrics
 
