@@ -2,7 +2,7 @@
 
 This project builds a Workforce Analytics Lakehouse using Databricks Free Edition, Unity Catalog, Databricks-managed storage, Python, and Delta Lake.
 
-The **Bronze and Silver layers are implemented**. Bronze preserves the raw source files, while Silver uses PySpark to clean, validate, standardize, deduplicate, and store the data as managed Delta tables.
+The **Bronze, Silver, and initial Gold layers are implemented**. Bronze preserves raw source files, Silver uses PySpark to clean and validate the data into managed Delta tables, and Gold provides analytics-ready views for workforce reporting. A Databricks AI/BI Workforce Outlook dashboard has also been created from the Gold layer.
 
 ## Project Goal
 
@@ -32,7 +32,7 @@ Silver  → Cleaned, validated, structured tables
 Gold    → Analytics-ready dashboard tables
 ```
 
-The **Bronze and Silver layers have been implemented**. The next stage is the Gold layer, where BLS and O*NET tables will be joined through standardized SOC occupation codes to support dashboards and workforce analytics.
+The **Bronze, Silver, and initial Gold layers have been implemented**. BLS and O*NET datasets are standardized around SOC occupation codes and exposed through analytics-ready Gold views. These views support the Databricks AI/BI Workforce Outlook dashboard and future workforce analytics products.
 
 The Bronze layer stores:
 
@@ -87,16 +87,27 @@ workforce-analytics-lakehouse/
 │
 ├── data/
 │   ├── bronze/
-│   ├── silver/
-│   │   ├── __init__.py
-│   │   ├── utils.py
-│   │   ├── bls_tables.py
-│   │   ├── onet_tables.py
-│   │   └── data_insertion.py
-│   └── gold/
+│   └── silver/
+│       ├── __init__.py
+│       ├── utils.py
+│       ├── bls_tables.py
+│       ├── onet_tables.py
+│       └── data_insertion.py
 │
 ├── sql/
-│   └── setup_unity_catalog.sql
+│   ├── setup_unity_catalog.sql
+│   └── gold/
+│       ├── 01_dim_occupation.sql
+│       ├── 02_fact_oews_measurement.sql
+│       ├── 03_fact_occupation_projection.sql
+│       ├── 04_bridge_occupation_education.sql
+│       ├── 05_bridge_occupation_skill.sql
+│       ├── 06_bridge_occupation_software.sql
+│       ├── 07_bridge_occupation_job_zone.sql
+│       └── 99_validate_gold_views.sql
+│
+├── dashboards/
+│   └── workforce_outlook.lvdash.json
 │
 ├── README.md
 └── requirements.txt
@@ -423,7 +434,7 @@ The Silver layer currently processes the following occupation-level sources:
 * BLS O*NET-SOC and NEM crosswalk files
 * O*NET occupation and workforce requirement text files
 
-The BLS and O*NET datasets are standardized around SOC occupation codes so they can be joined later in the Gold layer.
+The BLS and O*NET datasets are standardized around SOC occupation codes so they can be joined consistently in the Gold layer.
 
 ## Data Cleaning
 
@@ -581,7 +592,7 @@ unionByName()
 
 This creates one centralized data-quality issue dataset while preserving a consistent schema.
 
-The pipeline does not combine unrelated source tables into one oversized table. BLS and O*NET datasets remain source-aligned in Silver and will be joined through SOC codes in Gold.
+The pipeline does not combine unrelated source tables into one oversized table. BLS and O*NET datasets remain source-aligned in Silver and are joined through SOC codes in Gold.
 
 ## Data Lineage and Audit Columns
 
@@ -710,6 +721,192 @@ SELECT *
 FROM workforce_analytics.silver.data_quality_issues
 ORDER BY detected_at DESC;
 ```
+
+---
+
+# Gold Layer Implementation
+
+The Gold layer exposes analytics-ready views under:
+
+```text
+workforce_analytics.gold
+```
+
+The Gold layer joins and enriches BLS and O*NET data through standardized SOC occupation codes while preserving the grain of each source.
+
+## Gold Modeling Approach
+
+The Gold layer uses a small dimensional model rather than one oversized table:
+
+* One occupation dimension at the base six-digit SOC level
+* Fact views for OEWS measurements and employment projections
+* Bridge views for education, skills, software, and Job Zones
+* Separate validation queries for uniqueness, nulls, lookup coverage, and join coverage
+
+Detailed O*NET-SOC codes are preserved in bridge views because multiple O*NET occupations may map to the same base SOC code.
+
+## Gold Views
+
+### Occupation Dimension
+
+```text
+dim_occupation
+```
+
+Provides one canonical row per base SOC code with:
+
+* Occupation title
+* Major occupation group
+* BLS and O*NET source-availability flags
+* Count of detailed O*NET occupations mapped to the SOC code
+
+### OEWS Measurement Fact
+
+```text
+fact_oews_measurement
+```
+
+Combines OEWS observations with readable metadata for occupation, area, industry, measurement datatype, observation period, and measurement value.
+
+### Occupation Projection Fact
+
+```text
+fact_occupation_projection
+```
+
+Provides occupation-level BLS Employment Projections metrics including:
+
+* 2024 employment
+* 2034 projected employment
+* Numeric and percentage employment change
+* Annual occupational openings
+* Median annual wage
+* Typical entry education
+* Related work experience
+* On-the-job training
+* Growth direction
+
+The view contains both detailed occupation rows and BLS summary rows. Dashboard datasets filter to:
+
+```text
+occupation_type = 'Line item'
+```
+
+This prevents aggregate occupation groups from being summed together with detailed occupations.
+
+### O*NET Bridge Views
+
+```text
+bridge_occupation_education
+bridge_occupation_skill
+bridge_occupation_software
+bridge_occupation_job_zone
+```
+
+These views preserve detailed O*NET occupation relationships and support analysis of education distributions, essential and transferable skills, skill importance and level ratings, workplace software, hot technologies, in-demand technologies, and job preparation levels.
+
+## Creating the Gold Views
+
+Run the files in this order:
+
+```text
+sql/gold/01_dim_occupation.sql
+sql/gold/02_fact_oews_measurement.sql
+sql/gold/03_fact_occupation_projection.sql
+sql/gold/04_bridge_occupation_education.sql
+sql/gold/05_bridge_occupation_skill.sql
+sql/gold/06_bridge_occupation_software.sql
+sql/gold/07_bridge_occupation_job_zone.sql
+```
+
+Then run:
+
+```text
+sql/gold/99_validate_gold_views.sql
+```
+
+## Gold Validation
+
+The Gold validation script checks:
+
+* One row per SOC code in `dim_occupation`
+* Null SOC codes and occupation titles
+* Duplicate OEWS observation keys
+* Occupation, area, industry, and datatype lookup coverage
+* Projection-to-occupation join coverage
+* Duplicate education, skill, and software business keys
+* O*NET coverage by base SOC code
+
+Duplicate checks should return zero rows.
+
+Example verification:
+
+```sql
+SHOW VIEWS IN workforce_analytics.gold;
+
+SELECT *
+FROM workforce_analytics.gold.fact_occupation_projection
+WHERE occupation_type = 'Line item'
+ORDER BY employment_change_percent DESC
+LIMIT 20;
+```
+
+---
+
+# Databricks AI/BI Dashboard
+
+A Databricks AI/BI **Workforce Outlook Dashboard** was created from:
+
+```text
+workforce_analytics.gold.fact_occupation_projection
+```
+
+Databricks Genie Code generated the initial dashboard structure, datasets, charts, KPI cards, and filters. The generated dashboard was then manually reviewed and corrected to ensure accurate analytical results.
+
+## Dashboard Metrics
+
+The dashboard presents:
+
+* Total base-year employment
+* Total projected employment
+* Total annual occupational openings
+* Average median annual wage across occupations
+* Fastest-growing occupations
+* Occupations with the most annual openings
+* Highest-paying occupations
+* Wage and projected-growth comparisons
+* Typical entry education
+* Related work experience
+* On-the-job training
+
+## Dashboard Validation and Corrections
+
+The dashboard dataset uses:
+
+```text
+occupation_type = 'Line item'
+```
+
+This excludes BLS summary groups such as total occupations, major occupation groups, and broad occupation categories.
+
+The dashboard was also validated to:
+
+* Prevent employment and openings from being double-counted
+* Remove null education values from the occupation-details table
+* Display wages as U.S. currency
+* Display growth values as percentages rather than multiplied percentages
+* Sort growth, wage, and openings rankings from highest to lowest
+* Preserve functional occupation, education, growth, and training filters
+
+After filtering to detailed occupations, the base-year employment KPI decreased from an incorrectly aggregated value of approximately 755 million to approximately 170 million.
+
+The dashboard definition can be exported from Databricks as:
+
+```text
+dashboards/workforce_outlook.lvdash.json
+```
+
+The exported definition stores dashboard datasets, visualizations, filters, and layout configuration for version control.
 
 
 ---
@@ -872,23 +1069,23 @@ Detailed validation of these responses is handled in the Silver layer.
 
 ---
 
-# Next Stage: Gold Layer
-
-The next stage will create analytics-ready Gold tables that join BLS and O*NET data through standardized SOC occupation codes.
-
-Planned Gold outputs include:
-
-* Occupation wage and employment profiles
-* Fastest-growing and declining occupations
-* Highest-paying occupations by education level
-* Occupation skills and technology profiles
-* Education and training requirements by occupation
-* Annual openings and projected-growth analysis
-* Workforce shortage indicators
-* Power BI or Tableau dashboard tables
-
-Gold tables will be stored under:
+# Project Status
 
 ```text
-workforce_analytics.gold
+Bronze ingestion                  Complete
+Silver transformation pipeline   Complete
+Gold analytics views             Complete
+Gold validation queries          Complete
+Workforce Outlook dashboard      Complete
+Skills and Technology dashboard  Planned
 ```
+
+# Next Enhancements
+
+Planned additions include:
+
+* A Skills and Technology dashboard using the O*NET Gold bridge views
+* Purpose-built Gold marts for high-growth skills, education, and technologies
+* Scheduled pipeline and dashboard refreshes
+* Additional workforce-shortage indicators
+* Dashboard export and version control through `.lvdash.json`
